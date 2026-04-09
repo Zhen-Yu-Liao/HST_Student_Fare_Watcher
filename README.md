@@ -9,7 +9,7 @@
 - 自動處理驗證碼
 - 反覆查詢指定班次與折扣
 - 命中後自動進入訂位流程
-- 可選擇寄送 Gmail 通知
+- 寄送 Gmail 通知
 
 ## 安裝
 
@@ -101,8 +101,6 @@ python thsrc_auto_booker.py
 常見失敗原因：
 
 - 沒有開 `2-Step Verification`，就不會看到 `App Passwords`
-- 公司或學校的 Google Workspace 帳號，管理員可能直接停用這個功能
-- 開了 `Advanced Protection`，或帳號被限制只能用安全金鑰時，也可能看不到 `App Passwords`
 - 如果你改過 Google 帳號密碼，舊的 App Password 可能失效，需要重新建立
 - 你若把一般 Gmail 密碼填進 `GMAIL_APP_PASSWORD`，SMTP 會回 `535 5.7.8 Username and Password not accepted`
 

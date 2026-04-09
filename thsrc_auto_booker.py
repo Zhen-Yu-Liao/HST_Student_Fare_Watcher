@@ -11,11 +11,6 @@ THSR 監看 → 命中自動訂 (單檔版，使用 CONFIG 設定)
   - 會每次開新瀏覽器查詢 → 發現符合折數(預設「學生5折」)就自動選班次並完成訂位。
   - 成功或到期未命中，都會寄 Email 通知。(無簡訊)
 
-這版徹底修正「卡在請稍候…遮罩」：
-  1) 送出查詢後**先等遮罩關閉**，並等待『選擇車次(BookingS2)』或錯誤訊息出現；
-  2) 遮罩 8 秒仍不消失會**強制呼叫 hideMaskFrame()/$.unblockUI()** 關閉；
-  3) 偵測『驗證碼錯誤』會自動重打並重送；
-  4) 追加 Accept-Language 與 Edge UA（可關）。
 """
 
 from __future__ import annotations
@@ -38,7 +33,7 @@ CONFIG = {
     "search": {
         "origin": "新竹",
         "dest": "台南",
-        "date": "2025-10-26",   # YYYY-MM-DD
+        "date": "2026-04-16",   # YYYY-MM-DD
         "time": "08:00",        # 下拉選項顯示文字
         "adult": 0,
         "student": 1,
@@ -54,13 +49,13 @@ CONFIG = {
         "interval_min": 10,
         "interval_max": 30,
         # 到期時間 (Asia/Taipei)，到期仍未命中會寄信並結束；留空代表無期限
-        "until": "2025-10-17 01:50",
+        "until": "2026-04-16 01:50",
         # 安全網: 最多嘗試回合數 (None 代表不限制)
         "max_rounds": None,
     },
     "browser": {
         "use_edge": True,       # True 則使用 Edge channel
-        "headless": False,      # 改 True 可無頭
+        "headless": False,      # 改 True 可無頭，瀏覽器就不會跳出來了，但開發測試時建議先用 False 看看流程跑得順不順
         "proxies_file": "proxies.txt",  # 可空字串或檔案不存在則不使用
         # 可選：覆寫 UA / Accept-Language
         "force_user_agent": None,  # 例如: Edge on Windows UA；None 則使用預設(隨 channel)
