@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 THSR 監看 → 命中自動訂 (單檔版，使用 CONFIG 設定)
 
@@ -29,6 +29,7 @@ from typing import Optional, Tuple
 
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeoutError
 import ddddocr
+from dotenv import load_dotenv
 
 # =============================
 #            CONFIG
@@ -44,9 +45,9 @@ CONFIG = {
         "discount_key": "學生5折",  # 命中關鍵字 (例: 學生5折 / 學生75折 / 學生88折)
     },
     "booking": {
-        "idno": "F130355710",
-        "phone": "0976949925",
-        "email": "gogle130355710@gmail.com",
+        "idno": "",
+        "phone": "",
+        "email": "",
     },
     "watch": {
         # 每回合等待秒數區間 (含隨機抖動)
@@ -70,15 +71,17 @@ CONFIG = {
         "smtp": {
             "host": "smtp.gmail.com",
             "port": 587,
-            "username": "gogle130355710@gmail.com",
-            "password": "xyqrcfauievkzqap",  # 16 碼 App Password
+            "username": "",
+            "password": "",  # 16 碼 App Password
             "starttls": True,
         },
-        "mail_from": "gogle130355710@gmail.com",
-        "mail_to": ["gogle130355710@gmail.com"],
+        "mail_from": "",
+        "mail_to": [],
         "subject_prefix": "[THSR Watcher Test] ",
     },
 }
+
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 URL = "https://irs.thsrc.com.tw/IMINT/?utm_source=thsrc&utm_medium=btnlink&utm_term=booking"
 TZ = ZoneInfo("Asia/Taipei")
@@ -91,6 +94,30 @@ DEFAULT_EDGE_UA = (
 # =============================
 #          Utilities
 # =============================
+
+def _apply_env_overrides() -> None:
+    booking = CONFIG["booking"]
+    notify = CONFIG["notify"]
+    smtp = notify["smtp"]
+
+    booking["idno"] = os.getenv("THSRC_IDNO", booking["idno"])
+    booking["phone"] = os.getenv("THSRC_PHONE", booking["phone"])
+    booking["email"] = os.getenv("THSRC_EMAIL", booking["email"])
+
+    gmail_sender = os.getenv("GMAIL_SENDER")
+    gmail_password = os.getenv("GMAIL_APP_PASSWORD")
+    email_to = os.getenv("EMAIL_TO")
+
+    if gmail_sender:
+        smtp["username"] = gmail_sender
+        notify["mail_from"] = gmail_sender
+    if gmail_password:
+        smtp["password"] = gmail_password
+    if email_to:
+        notify["mail_to"] = [addr.strip() for addr in email_to.split(",") if addr.strip()]
+
+
+_apply_env_overrides()
 
 def _until_dt() -> Optional[datetime]:
     s = CONFIG["watch"].get("until")
