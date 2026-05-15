@@ -15,14 +15,16 @@ THSR 監看 → 命中自動訂 (單檔版，使用 CONFIG 設定)
 
 from __future__ import annotations
 import os, time, random, re, smtplib, traceback
+from dataclasses import dataclass
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 from contextlib import contextmanager
 from typing import Optional, Tuple
 
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeoutError
+from playwright.sync_api import sync_playwright
 import ddddocr
 from dotenv import load_dotenv
 
@@ -33,8 +35,8 @@ CONFIG = {
     "search": {
         "origin": "新竹",
         "dest": "台南",
-        "date": "2026-04-16",   # YYYY-MM-DD
-        "time": "08:00",        # 下拉選項顯示文字
+        "date": "2026-05-11",   # YYYY-MM-DD
+        "time": "11:00",        # 下拉選項顯示文字
         "adult": 0,
         "student": 1,
         "discount_key": "學生5折",  # 命中關鍵字 (例: 學生5折 / 學生75折 / 學生88折)
@@ -46,16 +48,16 @@ CONFIG = {
     },
     "watch": {
         # 每回合等待秒數區間 (含隨機抖動)
-        "interval_min": 10,
-        "interval_max": 30,
+        "interval_min": 3,
+        "interval_max": 10,
         # 到期時間 (Asia/Taipei)，到期仍未命中會寄信並結束；留空代表無期限
-        "until": "2026-04-16 01:50",
+        "until": "2026-05-11 12:30",
         # 安全網: 最多嘗試回合數 (None 代表不限制)
         "max_rounds": None,
     },
     "browser": {
         "use_edge": True,       # True 則使用 Edge channel
-        "headless": False,      # 改 True 可無頭，瀏覽器就不會跳出來了，但開發測試時建議先用 False 看看流程跑得順不順
+        "headless": True,      # 改 True 可無頭，瀏覽器就不會跳出來了，但開發測試時建議先用 False 看看流程跑得順不順
         "proxies_file": "proxies.txt",  # 可空字串或檔案不存在則不使用
         # 可選：覆寫 UA / Accept-Language
         "force_user_agent": None,  # 例如: Edge on Windows UA；None 則使用預設(隨 channel)
@@ -85,6 +87,24 @@ DEFAULT_EDGE_UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0"
 )
+
+
+@dataclass
+class SelectedTrain:
+    train_no: Optional[str]
+    discount_text: str
+    row_text: str
+
+
+@dataclass
+class BookingEvidence:
+    booking_code: str
+    train_no: Optional[str]
+    page_text: str
+    ticket_html: Optional[str] = None
+    html_path: Optional[str] = None
+    text_path: Optional[str] = None
+    screenshot_path: Optional[str] = None
 
 # =============================
 #          Utilities
@@ -137,6 +157,89 @@ def log(msg: str) -> None:
     print(f"[{ts}] {msg}")
 
 
+def normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()
+
+
+def extract_booking_code(text: str) -> Optional[str]:
+    """只接受緊鄰「訂位代號」標籤後方的 8 碼數字。"""
+    if not text:
+        return None
+
+    for match in re.finditer(r"(?:訂位代號|訂位編號|訂位代碼)\s*[:：]?\s*([0-9][0-9\s-]{6,18}[0-9])", text):
+        digits = re.sub(r"\D", "", match.group(1))
+        if len(digits) == 8:
+            return digits
+    return None
+
+
+def has_confirmed_booking(text: str) -> bool:
+    return extract_booking_code(text) is not None
+
+
+def is_sold_out_error(text: str) -> bool:
+    normalized = normalize_text(text)
+    return any(
+        phrase in normalized
+        for phrase in [
+            "可銷售之座位或優惠座位已額滿",
+            "優惠座位已額滿",
+            "座位已額滿",
+            "請重新操作",
+            "改選其他行程",
+        ]
+    )
+
+
+def extract_train_no(text: str) -> Optional[str]:
+    if not text:
+        return None
+
+    for pattern in [
+        r"(?:車次|車\s*次|Train\s*No\.?)\D{0,20}(\d{3,4})",
+        r"^\s*(\d{3,4})\b",
+    ]:
+        match = re.search(pattern, text, flags=re.IGNORECASE | re.MULTILINE)
+        if match:
+            return match.group(1)
+    return None
+
+
+def validate_booking_config(config: dict) -> tuple[list[str], list[str]]:
+    booking = config.get("booking", {})
+    critical_missing: list[str] = []
+    optional_missing: list[str] = []
+
+    if not (booking.get("idno") or "").strip():
+        critical_missing.append("THSRC_IDNO")
+    if not (booking.get("phone") or "").strip():
+        optional_missing.append("THSRC_PHONE")
+    if not (booking.get("email") or "").strip():
+        optional_missing.append("THSRC_EMAIL")
+
+    return critical_missing, optional_missing
+
+
+def is_retryable_round_failure(reason: str) -> bool:
+    return reason in {"captcha_failed", "submit_failed", "round_exception", "sold_out"}
+
+
+def run_preflight_checks() -> None:
+    critical_missing, optional_missing = validate_booking_config(CONFIG)
+    if optional_missing:
+        log(f"提醒：{', '.join(optional_missing)} 尚未設定，可能收不到高鐵簡訊或 Email。")
+    if critical_missing:
+        missing = ", ".join(critical_missing)
+        raise SystemExit(
+            f"必要訂位資料未設定：{missing}。\n"
+            "請先在 .env 加上並填妥以下欄位：\n"
+            "THSRC_IDNO=你的身分證字號或取票識別碼\n"
+            "THSRC_PHONE=你的手機號碼\n"
+            "THSRC_EMAIL=你的電子郵件\n"
+            "不要等選到票後才送出空白取票識別碼。"
+        )
+
+
 def load_proxies(path: str) -> list[str]:
     if not path or not os.path.exists(path):
         return []
@@ -166,6 +269,64 @@ def send_email(subject: str, html: str):
             s.quit()
         except Exception:
             pass
+
+
+def safe_send_email(subject: str, html: str) -> bool:
+    try:
+        send_email(subject, html)
+        return True
+    except Exception as exc:
+        log(f"Email 通知失敗，不影響主流程：{exc}")
+        return False
+
+
+def booking_log_dir() -> Path:
+    path = Path(__file__).resolve().parent / "booking_logs"
+    path.mkdir(exist_ok=True)
+    return path
+
+
+def read_page_text(page) -> str:
+    try:
+        return normalize_text(page.evaluate("() => document.body ? document.body.innerText : ''"))
+    except Exception:
+        return ""
+
+
+def save_page_artifacts(page, prefix: str) -> dict[str, Optional[str]]:
+    ts = _now().strftime("%Y%m%d_%H%M%S")
+    base = booking_log_dir() / f"{prefix}_{ts}"
+    paths: dict[str, Optional[str]] = {"html": None, "text": None, "screenshot": None}
+
+    try:
+        html_path = base.with_suffix(".html")
+        html_path.write_text(page.content(), encoding="utf-8")
+        paths["html"] = str(html_path)
+    except Exception as exc:
+        log(f"保存 HTML 失敗：{exc}")
+
+    try:
+        text_path = base.with_suffix(".txt")
+        text_path.write_text(read_page_text(page), encoding="utf-8")
+        paths["text"] = str(text_path)
+    except Exception as exc:
+        log(f"保存頁面文字失敗：{exc}")
+
+    try:
+        screenshot_path = base.with_suffix(".png")
+        page.screenshot(path=str(screenshot_path), full_page=True)
+        paths["screenshot"] = str(screenshot_path)
+    except Exception as exc:
+        log(f"保存截圖失敗：{exc}")
+
+    return paths
+
+
+def save_text_artifact(prefix: str, text: str) -> str:
+    ts = _now().strftime("%Y%m%d_%H%M%S")
+    path = booking_log_dir() / f"{prefix}_{ts}.txt"
+    path.write_text(text, encoding="utf-8")
+    return str(path)
 
 # =============================
 #       Playwright helpers
@@ -402,36 +563,44 @@ def submit_and_wait_step2(page, max_submit_retries=5):
         else:
             log(f"等待結果超時（{attempt+1} / {max_submit_retries}），嘗試再送")
             try:
-                handle_captcha(page)
-            except Exception:
-                pass
+                captcha_ok = handle_captcha(page)
+            except Exception as exc:
+                log(f"重新處理驗證碼時發生例外：{exc}")
+                captcha_ok = False
+            if not captcha_ok:
+                log("重新處理驗證碼失敗，跳過本輪。")
+                return False
             continue
     return False
 
 
-def parse_and_pick_discount(page) -> bool:
+def parse_and_pick_discount(page) -> Optional[SelectedTrain]:
     key = CONFIG["search"]["discount_key"]
     page.wait_for_load_state("domcontentloaded")
     wait_mask_then_clear_if_stuck(page, hard_timeout_ms=20000)
     if wait_step2_or_error(page, timeout_ms=20000) != "step2":
-        return False
+        return None
 
     # 找到所有車次列
     items = page.locator("#BookingS2Form_TrainQueryDataViewPanel .result-listing label.result-item")
     n = items.count()
     target_index = -1
+    selected_discount = ""
+    selected_text = ""
     for i in range(n):
         try:
             lab = items.nth(i)
             disc_txt = lab.locator(".discount").inner_text(timeout=800).strip()
             if key in disc_txt:
                 target_index = i
+                selected_discount = normalize_text(disc_txt)
+                selected_text = normalize_text(lab.inner_text(timeout=1000))
                 break
         except Exception:
             continue
 
     if target_index == -1:
-        return False
+        return None
 
     row = items.nth(target_index)
     row.click()
@@ -445,10 +614,46 @@ def parse_and_pick_discount(page) -> bool:
         except Exception:
             pass
     wait_mask_then_clear_if_stuck(page, hard_timeout_ms=20000)
-    return True
+    return SelectedTrain(
+        train_no=extract_train_no(selected_text),
+        discount_text=selected_discount,
+        row_text=selected_text,
+    )
 
 
-def step3_fill_and_submit(page) -> bool:
+def wait_for_booking_confirmation(page, selected_train: Optional[SelectedTrain], timeout_ms: int = 30000) -> Optional[BookingEvidence]:
+    deadline = time.time() + timeout_ms / 1000.0
+
+    while time.time() < deadline:
+        text = read_page_text(page)
+
+        booking_code = extract_booking_code(text)
+        if booking_code:
+            paths = save_page_artifacts(page, "booking_success")
+            return BookingEvidence(
+                booking_code=booking_code,
+                train_no=(selected_train.train_no if selected_train else extract_train_no(text)),
+                page_text=text,
+                html_path=paths["html"],
+                text_path=paths["text"],
+                screenshot_path=paths["screenshot"],
+            )
+
+        err = read_error_text(page)
+        if err and any(key in err for key in ["錯誤", "失敗", "無法", "逾時", "未完成"]):
+            log(f"訂位送出後出現錯誤：{err}")
+            break
+
+        time.sleep(0.5)
+
+    paths = save_page_artifacts(page, "booking_unconfirmed")
+    log("送出後未取得 8 碼訂位代號，因此不再判定為 booked。")
+    if paths.get("text"):
+        log(f"已保存未確認頁面文字：{paths['text']}")
+    return None
+
+
+def step3_fill_and_submit(page, selected_train: Optional[SelectedTrain]) -> Optional[BookingEvidence]:
     b = CONFIG["booking"]
     page.wait_for_selector('#BookingS3FormSP', timeout=25000)
 
@@ -479,14 +684,7 @@ def step3_fill_and_submit(page) -> bool:
             pass
     wait_mask_then_clear_if_stuck(page, hard_timeout_ms=20000)
 
-    try:
-        page.wait_for_function(
-            """() => /完成訂位|訂位代號|已完成/.test(document.body.innerText)""",
-            timeout=25000,
-        )
-        return True
-    except PWTimeoutError:
-        return False
+    return wait_for_booking_confirmation(page, selected_train, timeout_ms=30000)
 
 
 @contextmanager
@@ -530,13 +728,14 @@ def make_context(p, proxy: Optional[str]):
 #           Runner
 # =============================
 
-def run_once(proxy: Optional[str]) -> Tuple[bool, str, Optional[str]]:
-    """回傳 (is_success, reason, ticket_html)
-    reason: booked / no_match / captcha_failed / submit_failed / exception
-    ticket_html: 成功時回傳 Step3 摘要 HTML 片段以供寄信 (容錯: 可能為 None)
+def run_once(proxy: Optional[str]) -> Tuple[bool, str, Optional[BookingEvidence]]:
+    """回傳 (is_success, reason, evidence)
+    reason: booked / no_match / captcha_failed / submit_failed / sold_out / round_exception / confirmation_missing / exception
+    evidence: 成功時包含 8 碼訂位代號與本地頁面證據
     """
     with sync_playwright() as p, make_context(p, proxy) as ctx:
         page = ctx.new_page()
+        stage = "search"
         try:
             page.goto(URL, wait_until='domcontentloaded', timeout=60000)
             close_consent(page)
@@ -551,22 +750,47 @@ def run_once(proxy: Optional[str]) -> Tuple[bool, str, Optional[str]]:
             if not ok_submit:
                 return False, 'submit_failed', None
 
-            picked = parse_and_pick_discount(page)
-            if not picked:
+            selected_train = parse_and_pick_discount(page)
+            if not selected_train:
                 return False, 'no_match', None
+            stage = "train_selected"
+            if selected_train.train_no:
+                log(f"選取車次：{selected_train.train_no}（{CONFIG['search']['discount_key']}）")
+            else:
+                log(f"已選取符合「{CONFIG['search']['discount_key']}」的車次，但未能解析車次號碼")
 
             try:
                 card_html = page.locator('.ticket-card').first.inner_html(timeout=5000)
             except Exception:
                 card_html = None
 
-            ok = step3_fill_and_submit(page)
-            return (True, 'booked', card_html) if ok else (False, 'submit_failed', card_html)
-        except Exception:
-            return False, 'exception', None
+            stage = "booking_submit"
+            evidence = step3_fill_and_submit(page, selected_train)
+            if evidence:
+                evidence.ticket_html = card_html
+                return True, 'booked', evidence
+            if is_sold_out_error(read_page_text(page)):
+                log("高鐵回覆座位或優惠座位已額滿，跳過本輪。")
+                return False, 'sold_out', None
+            return False, 'confirmation_missing', None
+        except Exception as exc:
+            tb = traceback.format_exc()
+            log(f"本回合例外：{exc}")
+            try:
+                paths = save_page_artifacts(page, "round_exception")
+                if paths.get("text"):
+                    log(f"已保存例外頁面文字：{paths['text']}")
+                error_path = save_text_artifact("round_exception_traceback", tb)
+                log(f"已保存例外 traceback：{error_path}")
+            except Exception:
+                pass
+            reason = "exception" if stage == "booking_submit" else "round_exception"
+            return False, reason, None
 
 
 def main():
+    run_preflight_checks()
+
     br = CONFIG["browser"]
     proxies = load_proxies(br.get("proxies_file", ""))
     proxy_idx = 0
@@ -582,14 +806,14 @@ def main():
         if max_rounds is not None and round_no > max_rounds:
             subject = "已達最大回合，未找到票"
             html = f"<p>從 {start_ts} 起共嘗試 {max_rounds} 回，仍未找到『{CONFIG['search']['discount_key']}』。</p>"
-            send_email(subject, html)
+            safe_send_email(subject, html)
             print(subject)
             break
 
         if until and _now() >= until:
             subject = "已到期，未找到票"
             html = f"<p>監看已到 {until} 結束，未找到『{CONFIG['search']['discount_key']}』。</p>"
-            send_email(subject, html)
+            safe_send_email(subject, html)
             print(subject)
             break
 
@@ -599,21 +823,52 @@ def main():
             proxy_idx += 1
 
         print(f"== Round {round_no} | proxy={proxy or '-'} ==")
-        ok, why, ticket_html = run_once(proxy)
+        ok, why, evidence = run_once(proxy)
         print(f"結果：{why}")
 
         if ok:
             s = CONFIG["search"]
-            subject = f"命中並嘗試完成訂位：{s['origin']}→{s['dest']} {s['date']} {s['time']} ({s['discount_key']})"
+            subject = f"已完成訂位：{s['origin']}→{s['dest']} {s['date']} {s['time']} ({s['discount_key']})"
+            print(f"訂位代號：{evidence.booking_code}")
+            if evidence.train_no:
+                print(f"車次：{evidence.train_no}")
+            if evidence.text_path:
+                print(f"成功頁面文字已保存：{evidence.text_path}")
             body = [
-                f"<h3>已觸發訂位流程</h3>",
+                f"<h3>已完成訂位</h3>",
+                f"<p>訂位代號：<strong>{evidence.booking_code}</strong></p>",
+                f"<p>車次：{evidence.train_no or '未解析'}</p>",
                 f"<p>{s['origin']} → {s['dest']} | {s['date']} {s['time']} | 折扣: {s['discount_key']}</p>",
                 "<hr>",
-                ticket_html or "",
-                "<p>請自行登入官網或留意 Email/SMS 確認最終訂位狀態。</p>",
+                evidence.ticket_html or "",
+                "<p>請使用訂位代號與取票識別碼到官方通路付款/取票。</p>",
             ]
-            send_email(subject, "".join(body))
+            safe_send_email(subject, "".join(body))
             break
+
+        if why == "confirmation_missing":
+            subject = "訂位狀態未確認，已停止自動重試"
+            html = (
+                "<p>系統已選到符合條件的車次並送出訂位資料，但沒有在完成頁取得 8 碼訂位代號。</p>"
+                "<p>為避免重複訂位，程式已停止自動重試。請先檢查本機 booking_logs 內保存的頁面，"
+                "或用官方網站 / T-EX App 查詢訂位狀態。</p>"
+            )
+            safe_send_email(subject, html)
+            print(subject)
+            break
+
+        if why == "exception":
+            subject = "程式例外，已停止自動重試"
+            html = (
+                "<p>本回合執行時發生例外。為避免 selector 壞掉時持續重試或重複送出訂位資料，"
+                "程式已停止。請檢查 booking_logs 內最新的 round_exception 與 traceback 檔。</p>"
+            )
+            safe_send_email(subject, html)
+            print(subject)
+            break
+
+        if is_retryable_round_failure(why):
+            log("本輪屬於可重試失敗，等待下一輪。")
 
         # 未命中 → 等待後重試
         minv = int(CONFIG["watch"]["interval_min"])
@@ -629,7 +884,4 @@ if __name__ == "__main__":
     except Exception as e:
         print("Fatal error:", e)
         tb = traceback.format_exc()
-        try:
-            send_email("程式異常終止", f"<pre>{tb}</pre>")
-        except Exception:
-            pass
+        safe_send_email("程式異常終止", f"<pre>{tb}</pre>")

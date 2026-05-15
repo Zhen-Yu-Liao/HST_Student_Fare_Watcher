@@ -8,3 +8,4 @@ __pycache__/
 *.har
 out.csv
 captcha.png
+booking_logs/

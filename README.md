@@ -32,12 +32,15 @@ copy .env.example .env
 `.env` 內容如下：
 
 ```ini
-THSRC_IDNO=A123456789
-THSRC_PHONE=0912345678
-THSRC_EMAIL=you@example.com
-GMAIL_SENDER=your_gmail@gmail.com
-GMAIL_APP_PASSWORD=abcdefghijklmnop
-EMAIL_TO=your_gmail@gmail.com
+# 高鐵訂位資料
+THSRC_IDNO=
+THSRC_PHONE=
+THSRC_EMAIL=
+
+# Gmail 通知設定
+GMAIL_SENDER=
+GMAIL_APP_PASSWORD=
+EMAIL_TO=
 ```
 
 欄位說明：
@@ -52,6 +55,9 @@ EMAIL_TO=your_gmail@gmail.com
 注意：
 
 - 主腳本會先讀取 `CONFIG`，再用 `.env` 覆蓋對應敏感欄位。
+- `THSRC_IDNO` 是必要欄位，空白時程式會在啟動前停止，不會等選到票後才送出空白取票識別碼。
+- `THSRC_PHONE` 與 `THSRC_EMAIL` 不是程式啟動的硬性阻擋條件，但空白時可能收不到高鐵簡訊或 Email。
+- 如果你手上的 `.env` 是舊版格式，只有 `LINE_*`、`SEARCH_ARGS`、`TARGET_KEYWORD` 這類欄位，請不要整份覆蓋，直接把上面三個 `THSRC_*` 欄位加進現有 `.env`。
 - 如果你把 [thsrc_auto_booker.py](D:/User/桌面/Nathan/side_project/高鐵五折票/HST_Student_Fare_Watcher/thsrc_auto_booker.py) 內 `notify.enabled` 設成 `False`，就不一定要填 Gmail 相關欄位。
 
 ## `CONFIG` 需要改的欄位
@@ -79,6 +85,31 @@ EMAIL_TO=your_gmail@gmail.com
 ```bash
 python thsrc_auto_booker.py
 ```
+
+## 成功判定與本機紀錄
+
+程式現在只有在完成頁面解析到 `8` 碼訂位代號時，才會輸出 `結果：booked`。
+
+成功時終端機會印出：
+
+```text
+結果：booked
+訂位代號：12345678
+車次：817
+```
+
+同時會把完成頁保存到 `booking_logs/`，包含 `.html`、`.txt` 與 `.png`，方便後續確認付款/取票資料。這個資料夾可能包含個資，已加入 `.gitignore`，不要上傳。
+
+如果程式送出後沒有解析到訂位代號，會輸出 `結果：confirmation_missing` 並停止自動重試，避免重複訂位。此時請先檢查 `booking_logs/` 內保存的頁面，再用高鐵官方網站或 T-EX App 查詢狀態。
+
+以下狀態屬於本輪可重試失敗，程式會等待下一輪，不會整個中斷：
+
+- `captcha_failed`：驗證碼多次辨識或重抓失敗。
+- `submit_failed`：查詢送出失敗或等待結果超時。
+- `sold_out`：送出訂位資料時，高鐵回覆座位或優惠座位已額滿。
+- `round_exception`：還沒送出訂位資料前發生的頁面例外。
+
+若已進入送出訂位資料後才發生未確認狀態，程式仍會停止，避免重複訂位。
 
 ## Gmail 應用程式密碼申請教學
 
