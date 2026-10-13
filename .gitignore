@@ -1,0 +1,11 @@
+.env
+.debug/
+debug/
+.state/
+__pycache__/
+*.pyc
+*.pyo
+*.har
+out.csv
+captcha.png
+booking_logs/
